@@ -29,8 +29,12 @@ echo "- Smoke tests: $([ $SMOKE_RESULT -eq 0 ] && echo '✅ PASSED' || echo '❌
 echo "============================================="
 
 # Exit with error if any test failed
-if [ $UNIT_RESULT -ne 0 ] || [ $SMOKE_RESULT -ne 0 ]; then
-    exit 1
+if [ $UNIT_RESULT -ne 0 ]; then
+    exit $UNIT_RESULT
+fi
+
+if [ $SMOKE_RESULT -ne 0 ]; then
+    exit $SMOKE_RESULT
 fi
 
 exit 0

@@ -42,14 +42,26 @@ class ClaudeOrchestrationMCP:
             response.raise_for_status()
             data = response.json()
             
+            # Validate response is a dictionary
+            if not isinstance(data, dict):
+                return {
+                    "message": "Webhook processing failed",
+                    "event": payload.get("type", "unknown"),
+                    "handlerCount": 0,
+                    "results": [{
+                        "success": False,
+                        "error": f"Invalid response format: expected dictionary, got {type(data).__name__}"
+                    }]
+                }
+            
             # If the response has a standard API format, convert to webhook format
             if "success" in data and "results" not in data:
                 return {
-                    "message": "Webhook processed" if data["success"] else "Webhook processing failed",
+                    "message": "Webhook processed" if data.get("success") else "Webhook processing failed",
                     "event": payload.get("type", "unknown"),
-                    "handlerCount": 1 if data["success"] else 0,
+                    "handlerCount": 1 if data.get("success") else 0,
                     "results": [{
-                        "success": data["success"],
+                        "success": bool(data.get("success")),
                         "message": data.get("message", ""),
                         "data": data.get("data", {}),
                         "error": data.get("error")
@@ -89,6 +101,56 @@ class ClaudeOrchestrationMCP:
             dependencies: Array of session IDs that must complete before this session starts
         """
         
+        # Validate session type
+        valid_session_types = {"implementation", "analysis", "testing", "review", "coordination"}
+        if session_type not in valid_session_types:
+            return {
+                "message": "Webhook processing failed",
+                "event": "session.create",
+                "handlerCount": 0,
+                "results": [{
+                    "success": False,
+                    "error": f"Invalid session type: {session_type}. Must be one of: {', '.join(sorted(valid_session_types))}"
+                }]
+            }
+        
+        # Validate repository format
+        if not repository or "/" not in repository:
+            return {
+                "message": "Webhook processing failed",
+                "event": "session.create",
+                "handlerCount": 0,
+                "results": [{
+                    "success": False,
+                    "error": "Invalid repository format. Must be in 'owner/repo' format"
+                }]
+            }
+        
+        # Validate repository has exactly one slash
+        parts = repository.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return {
+                "message": "Webhook processing failed",
+                "event": "session.create",
+                "handlerCount": 0,
+                "results": [{
+                    "success": False,
+                    "error": "Invalid repository format. Must be in 'owner/repo' format with non-empty owner and repo names"
+                }]
+            }
+        
+        # Validate requirements is not empty
+        if not requirements or not requirements.strip():
+            return {
+                "message": "Webhook processing failed",
+                "event": "session.create",
+                "handlerCount": 0,
+                "results": [{
+                    "success": False,
+                    "error": "Requirements cannot be empty"
+                }]
+            }
+        
         project_data = {
             "repository": repository,
             "requirements": requirements
@@ -112,13 +174,18 @@ class ClaudeOrchestrationMCP:
         result = await self._make_request(payload)
         
         # Extract data from webhook response
-        if "results" in result and len(result.get("results", [])) > 0:
+        if "results" in result and isinstance(result.get("results"), list) and len(result.get("results", [])) > 0:
             first_result = result["results"][0]
-            if first_result.get("success"):
+            if isinstance(first_result, dict) and first_result.get("success"):
                 data = first_result.get("data", {})
                 # Ensure we have the expected structure
-                if "sessionId" in data or "session" in data:
-                    session_id = data.get("sessionId") or data.get("session", {}).get("id")
+                session_id = None
+                if isinstance(data, dict):
+                    session_id = data.get("sessionId")
+                    if not session_id and "session" in data and isinstance(data["session"], dict):
+                        session_id = data["session"].get("id")
+                
+                if session_id:
                     return {
                         "message": "Webhook processed",
                         "event": "session.create",
@@ -130,6 +197,17 @@ class ClaudeOrchestrationMCP:
                                 "sessionId": session_id,
                                 "status": data.get("status", "pending")
                             }
+                        }]
+                    }
+                else:
+                    # Session ID not found in expected locations
+                    return {
+                        "message": "Webhook processing failed",
+                        "event": "session.create",
+                        "handlerCount": 0,
+                        "results": [{
+                            "success": False,
+                            "error": "Session ID not found in API response"
                         }]
                     }
         
@@ -419,123 +497,64 @@ class ClaudeOrchestrationMCP:
 orchestration = ClaudeOrchestrationMCP()
 
 
+# Helper function to run async functions in sync context
+def run_async(coro):
+    """Run an async coroutine in a synchronous context, handling event loop issues"""
+    try:
+        # Check if there's already a running event loop
+        loop = asyncio.get_running_loop()
+        # If we have a running loop, use ThreadPoolExecutor to run in a new thread
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, coro)
+            return future.result()
+    except RuntimeError:
+        # No event loop running, use asyncio.run normally
+        return asyncio.run(coro)
+
+
 # Gradio wrapper functions for async methods
 def create_session_sync(session_type, repository, requirements, context="", branch="", dependencies=""):
     """Synchronous wrapper for create_session"""
     deps_list = [d.strip() for d in dependencies.split(",") if d.strip()] if dependencies else None
     
-    # Get the current event loop or create a new one
-    try:
-        loop = asyncio.get_running_loop()
-        # If we have a running loop, create a task and run it
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run,
-                orchestration.create_session(
-                    session_type, repository, requirements, context or None, branch or None, deps_list
-                )
-            )
-            result = future.result()
-    except RuntimeError:
-        # No event loop running, use asyncio.run normally
-        result = asyncio.run(orchestration.create_session(
-            session_type, repository, requirements, context or None, branch or None, deps_list
-        ))
+    result = run_async(orchestration.create_session(
+        session_type, repository, requirements, context or None, branch or None, deps_list
+    ))
     
     return json.dumps(result, indent=2)
 
 
 def start_session_sync(session_id):
     """Synchronous wrapper for start_session"""
-    try:
-        loop = asyncio.get_running_loop()
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run,
-                orchestration.start_session(session_id)
-            )
-            result = future.result()
-    except RuntimeError:
-        result = asyncio.run(orchestration.start_session(session_id))
-    
+    result = run_async(orchestration.start_session(session_id))
     return json.dumps(result, indent=2)
 
 
 def get_session_status_sync(session_id):
     """Synchronous wrapper for get_session_status"""
-    try:
-        loop = asyncio.get_running_loop()
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run,
-                orchestration.get_session_status(session_id)
-            )
-            result = future.result()
-    except RuntimeError:
-        result = asyncio.run(orchestration.get_session_status(session_id))
-    
+    result = run_async(orchestration.get_session_status(session_id))
     return json.dumps(result, indent=2)
 
 
 def get_session_output_sync(session_id):
     """Synchronous wrapper for get_session_output"""
-    try:
-        loop = asyncio.get_running_loop()
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run,
-                orchestration.get_session_output(session_id)
-            )
-            result = future.result()
-    except RuntimeError:
-        result = asyncio.run(orchestration.get_session_output(session_id))
-    
+    result = run_async(orchestration.get_session_output(session_id))
     return json.dumps(result, indent=2)
 
 
 def list_sessions_sync(orchestration_id="", status="all"):
     """Synchronous wrapper for list_sessions"""
-    try:
-        loop = asyncio.get_running_loop()
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run,
-                orchestration.list_sessions(
-                    orchestration_id or None, status if status != "all" else None
-                )
-            )
-            result = future.result()
-    except RuntimeError:
-        result = asyncio.run(orchestration.list_sessions(
-            orchestration_id or None, status if status != "all" else None
-        ))
-    
+    result = run_async(orchestration.list_sessions(
+        orchestration_id or None, status if status != "all" else None
+    ))
     return json.dumps(result, indent=2)
 
 
 def wait_for_session_sync(session_id, timeout_seconds=3600, poll_interval_seconds=10):
     """Synchronous wrapper for wait_for_session"""
-    try:
-        loop = asyncio.get_running_loop()
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            future = executor.submit(
-                asyncio.run,
-                orchestration.wait_for_session(
-                    session_id, int(timeout_seconds), int(poll_interval_seconds)
-                )
-            )
-            result = future.result()
-    except RuntimeError:
-        result = asyncio.run(orchestration.wait_for_session(
-            session_id, int(timeout_seconds), int(poll_interval_seconds)
-        ))
-    
+    result = run_async(orchestration.wait_for_session(
+        session_id, int(timeout_seconds), int(poll_interval_seconds)
+    ))
     return json.dumps(result, indent=2)
 
 

@@ -16,11 +16,11 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.9.18'
     
     - name: Install dependencies
       run: |
-        pip install httpx python-dotenv gradio
+        pip install -r requirements.txt
     
     - name: Run unit tests
       run: python test_unit_simple.py
