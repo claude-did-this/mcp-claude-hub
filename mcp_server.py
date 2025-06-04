@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 import json
 import gradio as gr
 import concurrent.futures
+import nest_asyncio
+
+# Apply nest_asyncio to allow nested event loops
+nest_asyncio.apply()
 
 # Load environment variables
 load_dotenv()
@@ -161,13 +165,21 @@ class ClaudeOrchestrationMCP:
         
         if branch:
             project_data["branch"] = branch
+        
+        # Filter out invalid dependencies
+        valid_deps = []
+        if dependencies:
+            for dep in dependencies:
+                # Skip empty strings and 'None' string
+                if dep and dep.lower() != 'none':
+                    valid_deps.append(dep)
             
         payload = {
             "type": "session.create",
             "session": {
                 "type": session_type,
                 "project": project_data,
-                "dependencies": dependencies or []
+                "dependencies": valid_deps
             }
         }
         
@@ -417,6 +429,46 @@ class ClaudeOrchestrationMCP:
                 }]
             }
     
+    async def create_orchestration(
+        self,
+        name: str,
+        description: str,
+        repository: str,
+        tasks: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """Create a new orchestration with multiple coordinated sessions"""
+        
+        payload = {
+            "type": "orchestration.create",
+            "orchestration": {
+                "name": name,
+                "description": description,
+                "repository": repository,
+                "tasks": tasks
+            }
+        }
+        
+        result = await self._make_request(payload)
+        
+        # Check if response is in webhook handler format
+        if "results" in result and len(result.get("results", [])) > 0:
+            first_result = result["results"][0]
+            if first_result.get("success"):
+                return result
+            else:
+                return result  # Return error response as-is
+        else:
+            # Fallback for unexpected response format
+            return {
+                "message": "Webhook processed",
+                "event": "orchestration.create",
+                "handlerCount": 1,
+                "results": [{
+                    "success": False,
+                    "error": "Unexpected response format from API"
+                }]
+            }
+    
     async def wait_for_session(
         self,
         session_id: str,
@@ -514,7 +566,16 @@ def run_async(coro):
 
 # Gradio wrapper functions for async methods
 def create_session_sync(session_type, repository, requirements, context="", branch="", dependencies=""):
-    """Synchronous wrapper for create_session"""
+    """Synchronous wrapper for create_session
+    
+    Args:
+        session_type: Type of session (implementation, analysis, testing, review, coordination)
+        repository: GitHub repository in format owner/repo
+        requirements: Requirements for this session
+        context: Additional context (optional)
+        branch: Target branch (optional)
+        dependencies: Comma-separated list of session IDs that must complete before this session starts (optional)
+    """
     deps_list = [d.strip() for d in dependencies.split(",") if d.strip()] if dependencies else None
     
     result = run_async(orchestration.create_session(
@@ -558,6 +619,34 @@ def wait_for_session_sync(session_id, timeout_seconds=3600, poll_interval_second
     return json.dumps(result, indent=2)
 
 
+def create_orchestration_sync(name: str, description: str, repository: str, tasks_json: str) -> str:
+    """Synchronous wrapper for create_orchestration
+    
+    Args:
+        name: Name of the orchestration
+        description: Description of what this orchestration accomplishes
+        repository: GitHub repository in format owner/repo
+        tasks_json: JSON string containing array of task definitions
+    """
+    try:
+        tasks = json.loads(tasks_json) if tasks_json else []
+    except json.JSONDecodeError:
+        return json.dumps({
+            "message": "Webhook processed",
+            "event": "orchestration.create",
+            "handlerCount": 1,
+            "results": [{
+                "success": False,
+                "error": "Invalid JSON in tasks_json parameter"
+            }]
+        }, indent=2)
+    
+    result = run_async(orchestration.create_orchestration(
+        name, description, repository, tasks
+    ))
+    return json.dumps(result, indent=2)
+
+
 # Create Gradio interface
 def create_gradio_interface():
     """Create the Gradio interface for the MCP server"""
@@ -590,8 +679,9 @@ def create_gradio_interface():
                         placeholder="feature/new-feature"
                     )
                     dependencies = gr.Textbox(
-                        label="Dependencies (comma-separated session IDs)",
-                        placeholder="session-id-1, session-id-2"
+                        label="Dependencies (optional, comma-separated session IDs)",
+                        placeholder="session-id-1, session-id-2",
+                        info="Enter session IDs that must complete before this session starts"
                     )
                     create_btn = gr.Button("Create Session", variant="primary")
                 
@@ -670,6 +760,32 @@ def create_gradio_interface():
                 list_sessions_sync,
                 inputs=[list_orchestration_id, list_status],
                 outputs=list_output
+            )
+        
+        with gr.Tab("Create Orchestration"):
+            with gr.Row():
+                with gr.Column():
+                    orch_name = gr.Textbox(label="Orchestration Name")
+                    orch_description = gr.Textbox(
+                        label="Description",
+                        lines=3,
+                        placeholder="What this orchestration will accomplish..."
+                    )
+                    orch_repository = gr.Textbox(label="Repository (owner/repo)", placeholder="owner/repo")
+                    orch_tasks = gr.Textbox(
+                        label="Tasks (JSON array)",
+                        lines=10,
+                        placeholder='[{"type": "implementation", "requirements": "...", "dependencies": []}]'
+                    )
+                    orch_create_btn = gr.Button("Create Orchestration", variant="primary")
+                
+                with gr.Column():
+                    orch_output = gr.Textbox(label="Result", lines=15)
+            
+            orch_create_btn.click(
+                create_orchestration_sync,
+                inputs=[orch_name, orch_description, orch_repository, orch_tasks],
+                outputs=orch_output
             )
         
         with gr.Tab("Wait for Session"):
