@@ -12,6 +12,7 @@ import httpx
 from dotenv import load_dotenv
 import json
 import gradio as gr
+import concurrent.futures
 
 # Load environment variables
 load_dotenv()
@@ -411,43 +412,119 @@ orchestration = ClaudeOrchestrationMCP()
 def create_session_sync(session_type, repository, requirements, context="", dependencies=""):
     """Synchronous wrapper for create_session"""
     deps_list = [d.strip() for d in dependencies.split(",") if d.strip()] if dependencies else None
-    result = asyncio.run(orchestration.create_session(
-        session_type, repository, requirements, context or None, deps_list
-    ))
+    
+    # Get the current event loop or create a new one
+    try:
+        loop = asyncio.get_running_loop()
+        # If we have a running loop, create a task and run it
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                orchestration.create_session(
+                    session_type, repository, requirements, context or None, deps_list
+                )
+            )
+            result = future.result()
+    except RuntimeError:
+        # No event loop running, use asyncio.run normally
+        result = asyncio.run(orchestration.create_session(
+            session_type, repository, requirements, context or None, deps_list
+        ))
+    
     return json.dumps(result, indent=2)
 
 
 def start_session_sync(session_id):
     """Synchronous wrapper for start_session"""
-    result = asyncio.run(orchestration.start_session(session_id))
+    try:
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                orchestration.start_session(session_id)
+            )
+            result = future.result()
+    except RuntimeError:
+        result = asyncio.run(orchestration.start_session(session_id))
+    
     return json.dumps(result, indent=2)
 
 
 def get_session_status_sync(session_id):
     """Synchronous wrapper for get_session_status"""
-    result = asyncio.run(orchestration.get_session_status(session_id))
+    try:
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                orchestration.get_session_status(session_id)
+            )
+            result = future.result()
+    except RuntimeError:
+        result = asyncio.run(orchestration.get_session_status(session_id))
+    
     return json.dumps(result, indent=2)
 
 
 def get_session_output_sync(session_id):
     """Synchronous wrapper for get_session_output"""
-    result = asyncio.run(orchestration.get_session_output(session_id))
+    try:
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                orchestration.get_session_output(session_id)
+            )
+            result = future.result()
+    except RuntimeError:
+        result = asyncio.run(orchestration.get_session_output(session_id))
+    
     return json.dumps(result, indent=2)
 
 
 def list_sessions_sync(orchestration_id="", status="all"):
     """Synchronous wrapper for list_sessions"""
-    result = asyncio.run(orchestration.list_sessions(
-        orchestration_id or None, status if status != "all" else None
-    ))
+    try:
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                orchestration.list_sessions(
+                    orchestration_id or None, status if status != "all" else None
+                )
+            )
+            result = future.result()
+    except RuntimeError:
+        result = asyncio.run(orchestration.list_sessions(
+            orchestration_id or None, status if status != "all" else None
+        ))
+    
     return json.dumps(result, indent=2)
 
 
 def wait_for_session_sync(session_id, timeout_seconds=3600, poll_interval_seconds=10):
     """Synchronous wrapper for wait_for_session"""
-    result = asyncio.run(orchestration.wait_for_session(
-        session_id, int(timeout_seconds), int(poll_interval_seconds)
-    ))
+    try:
+        loop = asyncio.get_running_loop()
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                orchestration.wait_for_session(
+                    session_id, int(timeout_seconds), int(poll_interval_seconds)
+                )
+            )
+            result = future.result()
+    except RuntimeError:
+        result = asyncio.run(orchestration.wait_for_session(
+            session_id, int(timeout_seconds), int(poll_interval_seconds)
+        ))
+    
     return json.dumps(result, indent=2)
 
 
