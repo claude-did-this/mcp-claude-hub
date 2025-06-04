@@ -40,7 +40,23 @@ class ClaudeOrchestrationMCP:
                 headers=headers
             )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            
+            # If the response has a standard API format, convert to webhook format
+            if "success" in data and "results" not in data:
+                return {
+                    "message": "Webhook processed" if data["success"] else "Webhook processing failed",
+                    "event": payload.get("type", "unknown"),
+                    "handlerCount": 1 if data["success"] else 0,
+                    "results": [{
+                        "success": data["success"],
+                        "message": data.get("message", ""),
+                        "data": data.get("data", {}),
+                        "error": data.get("error")
+                    }]
+                }
+            else:
+                return data
         except httpx.HTTPError as e:
             # Return in webhook handler format
             return {
@@ -59,62 +75,65 @@ class ClaudeOrchestrationMCP:
         repository: str,
         requirements: str,
         context: Optional[str] = None,
+        branch: Optional[str] = None,
         dependencies: Optional[List[str]] = None
     ) -> Dict[str, Any]:
-        """Create a new Claude Code session for a specific subtask"""
+        """Create a new Claude Code session for a specific subtask
         
+        Args:
+            session_type: Type of session - implementation, analysis, testing, review, or coordination
+            repository: GitHub repository in "owner/repo" format
+            requirements: Clear description of what Claude should do
+            context: Additional context about the codebase or requirements
+            branch: Target branch name (defaults to main/master)
+            dependencies: Array of session IDs that must complete before this session starts
+        """
+        
+        project_data = {
+            "repository": repository,
+            "requirements": requirements
+        }
+        
+        if context:
+            project_data["context"] = context
+        
+        if branch:
+            project_data["branch"] = branch
+            
         payload = {
             "type": "session.create",
             "session": {
                 "type": session_type,
-                "project": {
-                    "repository": repository,
-                    "requirements": requirements,
-                    "context": context or ""
-                },
+                "project": project_data,
                 "dependencies": dependencies or []
             }
         }
         
         result = await self._make_request(payload)
         
-        # Check if response is in webhook handler format
+        # Extract data from webhook response
         if "results" in result and len(result.get("results", [])) > 0:
             first_result = result["results"][0]
             if first_result.get("success"):
-                session = first_result.get("data", {}).get("session", {})
-                return {
-                    "message": "Webhook processed",
-                    "event": "session.create",
-                    "handlerCount": 1,
-                    "results": [{
-                        "success": True,
-                        "message": "Session created successfully",
-                        "data": {
-                            "session": {
-                                "id": session.get("id"),
-                                "type": session.get("type"),
-                                "status": session.get("status", "initializing"),
-                                "project": session.get("project", {}),
-                                "dependencies": session.get("dependencies", []),
-                                "containerId": session.get("containerId")
+                data = first_result.get("data", {})
+                # Ensure we have the expected structure
+                if "sessionId" in data or "session" in data:
+                    session_id = data.get("sessionId") or data.get("session", {}).get("id")
+                    return {
+                        "message": "Webhook processed",
+                        "event": "session.create",
+                        "handlerCount": 1,
+                        "results": [{
+                            "success": True,
+                            "message": "Session created",
+                            "data": {
+                                "sessionId": session_id,
+                                "status": data.get("status", "pending")
                             }
-                        }
-                    }]
-                }
-            else:
-                return result  # Return error response as-is
-        else:
-            # Fallback for unexpected response format
-            return {
-                "message": "Webhook processed",
-                "event": "session.create",
-                "handlerCount": 1,
-                "results": [{
-                    "success": False,
-                    "error": "Unexpected response format from API"
-                }]
-            }
+                        }]
+                    }
+        
+        return result  # Return as-is if error or unexpected format
     
     async def start_session(self, session_id: str) -> Dict[str, Any]:
         """Start a previously created session"""
@@ -126,57 +145,39 @@ class ClaudeOrchestrationMCP:
         
         result = await self._make_request(payload)
         
-        # Check if response is in webhook handler format
+        # Extract data from webhook response
         if "results" in result and len(result.get("results", [])) > 0:
             first_result = result["results"][0]
             if first_result.get("success"):
                 data = first_result.get("data", {})
-                session = data.get("session", {})
+                status = data.get("status", "initializing")
                 
-                # Check if session was queued due to dependencies
-                if "waitingFor" in data:
-                    return {
-                        "message": "Webhook processed",
-                        "event": "session.start",
-                        "handlerCount": 1,
-                        "results": [{
-                            "success": True,
-                            "message": "Session queued, waiting for dependencies",
-                            "data": {
-                                "session": session,
-                                "waitingFor": data.get("waitingFor", [])
-                            }
-                        }]
-                    }
-                else:
-                    return {
-                        "message": "Webhook processed",
-                        "event": "session.start",
-                        "handlerCount": 1,
-                        "results": [{
-                            "success": True,
-                            "message": "Session started",
-                            "data": {
-                                "session": session
-                            }
-                        }]
-                    }
-            else:
-                return result  # Return error response as-is
-        else:
-            # Fallback for unexpected response format
-            return {
-                "message": "Webhook processed",
-                "event": "session.start",
-                "handlerCount": 1,
-                "results": [{
-                    "success": False,
-                    "error": "Unexpected response format from API"
-                }]
-            }
+                return {
+                    "message": "Webhook processed",
+                    "event": "session.start",
+                    "handlerCount": 1,
+                    "results": [{
+                        "success": True,
+                        "message": "Session starting" if status == "initializing" else f"Session {status}",
+                        "data": {
+                            "status": status
+                        }
+                    }]
+                }
+        
+        return result  # Return as-is if error or unexpected format
     
     async def get_session_status(self, session_id: str) -> Dict[str, Any]:
-        """Get the current status of a session"""
+        """Get the current status and details of a session
+        
+        Returns session info including:
+            status: pending, initializing, running, completed, failed, cancelled, or queued
+            containerId: Docker container ID if running
+            claudeSessionId: Internal Claude session ID
+            startedAt: ISO timestamp when session started
+            completedAt: ISO timestamp when session completed
+            error: Error message if failed
+        """
         
         payload = {
             "type": "session.get",
@@ -201,9 +202,14 @@ class ClaudeOrchestrationMCP:
                                 "id": session.get("id"),
                                 "type": session.get("type"),
                                 "status": session.get("status"),
+                                "containerId": session.get("containerId"),
+                                "claudeSessionId": session.get("claudeSessionId"),
                                 "project": session.get("project", {}),
                                 "dependencies": session.get("dependencies", []),
-                                "output": session.get("output", {})
+                                "startedAt": session.get("startedAt"),
+                                "completedAt": session.get("completedAt"),
+                                "output": session.get("output"),
+                                "error": session.get("error")
                             }
                         }
                     }]
@@ -223,7 +229,14 @@ class ClaudeOrchestrationMCP:
             }
     
     async def get_session_output(self, session_id: str) -> Dict[str, Any]:
-        """Get the output from a completed session"""
+        """Get the output and artifacts from a completed session
+        
+        Returns:
+            logs: Array of log entries from the session
+            artifacts: Array of artifacts (files, commits, PRs, etc.) created
+            summary: Brief summary of what was accomplished
+            nextSteps: Suggested next steps
+        """
         
         payload = {
             "type": "session.output",
@@ -248,17 +261,10 @@ class ClaudeOrchestrationMCP:
                             "sessionId": data.get("sessionId", session_id),
                             "status": data.get("status", "completed"),
                             "output": {
+                                "logs": output.get("logs", []),
+                                "artifacts": output.get("artifacts", []),
                                 "summary": output.get("summary", ""),
-                                "filesCreated": output.get("filesCreated", []),
-                                "filesModified": output.get("filesModified", []),
-                                "testsRun": output.get("testsRun", False),
-                                "testsPassed": output.get("testsPassed", False),
-                                "errors": output.get("errors", []),
-                                "logs": output.get("logs", ""),
-                                "metrics": {
-                                    "durationSeconds": output.get("metrics", {}).get("durationSeconds", 0),
-                                    "tokensUsed": output.get("metrics", {}).get("tokensUsed", 0)
-                                }
+                                "nextSteps": output.get("nextSteps", [])
                             }
                         }
                     }]
@@ -282,7 +288,12 @@ class ClaudeOrchestrationMCP:
         orchestration_id: Optional[str] = None,
         status: Optional[str] = None
     ) -> Dict[str, Any]:
-        """List all sessions, optionally filtered"""
+        """List all sessions, optionally filtered by orchestration ID
+        
+        Args:
+            orchestration_id: Filter sessions by orchestration ID
+            status: Filter by status (pending, initializing, running, completed, failed, cancelled, queued)
+        """
         
         payload = {
             "type": "session.list"
@@ -409,7 +420,7 @@ orchestration = ClaudeOrchestrationMCP()
 
 
 # Gradio wrapper functions for async methods
-def create_session_sync(session_type, repository, requirements, context="", dependencies=""):
+def create_session_sync(session_type, repository, requirements, context="", branch="", dependencies=""):
     """Synchronous wrapper for create_session"""
     deps_list = [d.strip() for d in dependencies.split(",") if d.strip()] if dependencies else None
     
@@ -422,14 +433,14 @@ def create_session_sync(session_type, repository, requirements, context="", depe
             future = executor.submit(
                 asyncio.run,
                 orchestration.create_session(
-                    session_type, repository, requirements, context or None, deps_list
+                    session_type, repository, requirements, context or None, branch or None, deps_list
                 )
             )
             result = future.result()
     except RuntimeError:
         # No event loop running, use asyncio.run normally
         result = asyncio.run(orchestration.create_session(
-            session_type, repository, requirements, context or None, deps_list
+            session_type, repository, requirements, context or None, branch or None, deps_list
         ))
     
     return json.dumps(result, indent=2)
@@ -540,7 +551,7 @@ def create_gradio_interface():
             with gr.Row():
                 with gr.Column():
                     session_type = gr.Dropdown(
-                        choices=["implementation", "analysis", "testing", "review", "documentation"],
+                        choices=["implementation", "analysis", "testing", "review", "coordination"],
                         label="Session Type",
                         value="implementation"
                     )
@@ -555,6 +566,10 @@ def create_gradio_interface():
                         lines=3,
                         placeholder="Additional context about the project..."
                     )
+                    branch = gr.Textbox(
+                        label="Branch (optional)",
+                        placeholder="feature/new-feature"
+                    )
                     dependencies = gr.Textbox(
                         label="Dependencies (comma-separated session IDs)",
                         placeholder="session-id-1, session-id-2"
@@ -566,7 +581,7 @@ def create_gradio_interface():
             
             create_btn.click(
                 create_session_sync,
-                inputs=[session_type, repository, requirements, context, dependencies],
+                inputs=[session_type, repository, requirements, context, branch, dependencies],
                 outputs=create_output
             )
         
@@ -623,7 +638,7 @@ def create_gradio_interface():
                         placeholder="Leave empty to list all"
                     )
                     list_status = gr.Dropdown(
-                        choices=["all", "pending", "initializing", "queued", "running", "completed", "failed"],
+                        choices=["all", "pending", "initializing", "queued", "running", "completed", "failed", "cancelled"],
                         label="Status Filter",
                         value="all"
                     )
