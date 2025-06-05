@@ -1,3 +1,6 @@
-httpx==0.24.1
-python-dotenv==1.0.0
-gradio==3.50.2
+# MCP Claude Hub Requirements
+# Note: Requires Python 3.10+ for Gradio 5.x
+gradio>=5.32.1
+httpx>=0.28.0
+python-dotenv>=1.0.0
+nest-asyncio>=1.6.0
